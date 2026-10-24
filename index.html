@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Sign &amp; Date</title>
 <meta name="robots" content="noindex">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -64,7 +64,7 @@
   color-scheme:dark;
 }
 
-html{height:100%;box-sizing:border-box}
+html{height:100%;box-sizing:border-box;touch-action:pan-x pan-y}
 *,*::before,*::after{box-sizing:inherit}
 body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--fg);font-family:var(--font-ui);font-size:15px;line-height:1.45;-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
 button,label.btn{font:inherit;color:inherit}
@@ -127,7 +127,9 @@ img{max-width:100%}
 .save-btn{flex:none;min-height:40px;padding:0 14px;border:0;border-radius:11px;background:var(--accent);color:var(--on-accent);font-weight:600}
 .save-btn:active{background:var(--accent-press)}
 
-.viewer{flex:1;min-height:0;overflow:auto;background:var(--desk);-webkit-overflow-scrolling:touch;touch-action:manipulation;overscroll-behavior:contain}
+.viewer{flex:1;min-height:0;overflow:auto;background:var(--desk);-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;overscroll-behavior:contain}
+.pages{user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#pinchSpacer{height:0;pointer-events:none}
 .pages{display:flex;flex-direction:column;gap:40px;width:max-content;min-width:100%;padding-block:20px 48px;padding-left:var(--gutter-l);padding-right:var(--gutter-r)}
 .page{position:relative;flex:none;margin-inline:auto;background:var(--paper);box-shadow:var(--page-shadow)}
 .page canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
@@ -254,10 +256,10 @@ img{max-width:100%}
       <button type="button" id="saveBtn" class="save-btn">Save PDF</button>
     </header>
 
-    <main id="viewer" class="viewer" tabindex="-1"><div id="pages" class="pages"></div></main>
+    <main id="viewer" class="viewer" tabindex="-1"><div id="pages" class="pages"></div><div id="pinchSpacer" aria-hidden="true"></div></main>
 
     <footer class="dock">
-      <p id="hint" class="hint">Tap Signature or Date to add it to this page.</p>
+      <p id="hint" class="hint">Tap Signature or Date to add it here. Pinch to zoom.</p>
       <div class="dock-row">
         <button type="button" id="addSig" class="tool">
           <span class="chip"><img id="toolSig" alt=""></span><span>Signature</span>
@@ -296,8 +298,8 @@ img{max-width:100%}
 
   // ---------- constants ----------
   const INK = { blue: "#1470E4", black: "#111111" };
-  const ZOOMS = [1, 1.5, 2, 3];
-  const MAX_CANVAS_PX = 5e6;
+  const MAX_ZOOM = 4;
+  const MAX_CANVAS_PX = 7e6;
 
   const $ = (s) => document.querySelector(s);
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -310,10 +312,10 @@ img{max-width:100%}
 
   const state = {
     ink: INK[store.get("ink", "blue")] ? store.get("ink", "blue") : "blue",
-    sigWpt: clamp(Number(store.get("sigWpt", 150)) || 150, 40, 420),
-    dateWpt: clamp(Number(store.get("dateWpt", 72)) || 72, 24, 300),
+    sigFrac: clamp(Number(store.get("sigFrac", 0.26)) || 0.26, 0.05, 0.8),
+    dateFrac: clamp(Number(store.get("dateFrac", 0.13)) || 0.13, 0.03, 0.6),
     pdf: null, bytes: null, name: "document", pages: [], items: [],
-    selected: null, zoom: 0, scale: 1, nextId: 1
+    selected: null, zoom: 1, scale: 1, nextId: 1
   };
 
   // ---------- elements ----------
@@ -543,7 +545,7 @@ img{max-width:100%}
       pagesEl.append(el);
       Object.assign(pg, { el, canvas: c, layer, visible: false, renderedScale: 0 });
     });
-    state.zoom = 0;
+    state.zoom = 1;
     layout();
     viewer.scrollTop = 0;
     viewer.scrollLeft = 0;
@@ -559,15 +561,15 @@ img{max-width:100%}
 
   function layout() {
     if (!state.pages.length) return;
-    state.scale = fitScale() * ZOOMS[state.zoom];
+    state.scale = fitScale() * state.zoom;
     for (const pg of state.pages) {
       pg.el.style.width = pg.w * state.scale + "px";
       pg.el.style.height = pg.h * state.scale + "px";
       if (pg.visible) renderPage(pg);
     }
-    zoomLabel.textContent = state.zoom === 0 ? "Fit" : Math.round(ZOOMS[state.zoom] * 100) + "%";
-    zoomOut.disabled = state.zoom === 0;
-    zoomIn.disabled = state.zoom === ZOOMS.length - 1;
+    zoomLabel.textContent = state.zoom <= 1.001 ? "Fit" : Math.round(state.zoom * 100) + "%";
+    zoomOut.disabled = state.zoom <= 1.001;
+    zoomIn.disabled = state.zoom >= MAX_ZOOM - 0.001;
   }
 
   async function renderPage(pg) {
@@ -606,20 +608,104 @@ img{max-width:100%}
     if (pg.canvas) { pg.canvas.width = 0; pg.canvas.height = 0; }
   }
 
-  function setZoom(z) {
-    z = clamp(z, 0, ZOOMS.length - 1);
-    if (z === state.zoom || !state.pages.length) return;
-    const old = state.scale;
-    const cx = viewer.scrollLeft + viewer.clientWidth / 2;
-    const cy = viewer.scrollTop + viewer.clientHeight / 2;
-    state.zoom = z;
-    layout();
-    const r = state.scale / old;
-    viewer.scrollLeft = cx * r - viewer.clientWidth / 2;
-    viewer.scrollTop = cy * r - viewer.clientHeight / 2;
+  // ---------- where things are on screen ----------
+  // The part of the document area the person can actually see right now.
+  function visibleRect() {
+    const r = viewer.getBoundingClientRect();
+    let left = r.left, top = r.top, right = r.right, bottom = r.bottom;
+    const vv = window.visualViewport;
+    if (vv) {
+      left = Math.max(left, vv.offsetLeft); top = Math.max(top, vv.offsetTop);
+      right = Math.min(right, vv.offsetLeft + vv.width); bottom = Math.min(bottom, vv.offsetTop + vv.height);
+    }
+    if (right - left < 20 || bottom - top < 20) return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    return { left, top, right, bottom };
   }
-  zoomIn.addEventListener("click", () => setZoom(state.zoom + 1));
-  zoomOut.addEventListener("click", () => setZoom(state.zoom - 1));
+  // The page at a screen height, or the nearest one when the point falls between pages.
+  function pageIndexAt(y) {
+    let best = 0, bestD = Infinity;
+    state.pages.forEach((pg, i) => {
+      const r = pg.el.getBoundingClientRect();
+      const d = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    return best;
+  }
+  function anchorAt(x, y) {
+    const i = pageIndexAt(y), r = state.pages[i].el.getBoundingClientRect();
+    return { i, fx: (x - r.left) / r.width, fy: (y - r.top) / r.height };
+  }
+
+  // ---------- zoom: buttons, pinch, ctrl + wheel ----------
+  // Zooms the document only, so the top bar and the Signature / Date buttons always stay on screen.
+  function zoomTo(z, anchor, x, y) {
+    if (!state.pages.length) return;
+    state.zoom = clamp(z, 1, MAX_ZOOM);
+    layout();
+    const r = state.pages[anchor.i].el.getBoundingClientRect();
+    viewer.scrollLeft += r.left + anchor.fx * r.width - x;
+    viewer.scrollTop += r.top + anchor.fy * r.height - y;
+  }
+  function zoomBy(f) {
+    const v = visibleRect(), x = (v.left + v.right) / 2, y = (v.top + v.bottom) / 2;
+    let z = state.zoom * f;
+    if (z < 1.05) z = 1;
+    zoomTo(z, anchorAt(x, y), x, y);
+  }
+  zoomIn.addEventListener("click", () => zoomBy(1.5));
+  zoomOut.addEventListener("click", () => zoomBy(1 / 1.5));
+
+  const spacer = $("#pinchSpacer");
+  let pinch = null;
+  const tdist = (a, b) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  viewer.addEventListener("touchstart", (e) => {
+    if (e.touches.length !== 2 || !state.pages.length || pinch) return;
+    e.preventDefault();
+    if (drag) finishDrag();
+    const a = e.touches[0], b = e.touches[1];
+    const mx = (a.clientX + b.clientX) / 2, my = (a.clientY + b.clientY) / 2;
+    const vr = viewer.getBoundingClientRect();
+    pinch = { d0: Math.max(20, tdist(a, b)), mx0: mx, my0: my, mx, my, s: 1, z0: state.zoom, anchor: anchorAt(mx, my) };
+    // hold the scroll range steady while the preview is scaled
+    spacer.style.width = pagesEl.offsetWidth + "px";
+    spacer.style.height = "1px";
+    pagesEl.style.transformOrigin = (viewer.scrollLeft + mx - vr.left) + "px " + (viewer.scrollTop + my - vr.top) + "px";
+    pagesEl.style.willChange = "transform";
+  }, { passive: false });
+  viewer.addEventListener("touchmove", (e) => {
+    if (!pinch) return;
+    e.preventDefault();
+    if (e.touches.length < 2) return;
+    const a = e.touches[0], b = e.touches[1];
+    pinch.s = clamp(tdist(a, b) / pinch.d0, 0.8 / pinch.z0, (MAX_ZOOM * 1.1) / pinch.z0);
+    pinch.mx = (a.clientX + b.clientX) / 2;
+    pinch.my = (a.clientY + b.clientY) / 2;
+    pagesEl.style.transform = "translate(" + (pinch.mx - pinch.mx0) + "px," + (pinch.my - pinch.my0) + "px) scale(" + pinch.s + ")";
+  }, { passive: false });
+  function endPinch(e) {
+    if (!pinch || e.touches.length >= 2) return;
+    const p = pinch;
+    pinch = null;
+    pagesEl.style.transform = "";
+    pagesEl.style.transformOrigin = "";
+    pagesEl.style.willChange = "";
+    let z = p.z0 * p.s;
+    if (z < 1.05) z = 1;
+    zoomTo(z, p.anchor, p.mx, p.my);
+    spacer.style.height = "";
+    spacer.style.width = "";
+  }
+  viewer.addEventListener("touchend", endPinch);
+  viewer.addEventListener("touchcancel", endPinch);
+  viewer.addEventListener("wheel", (e) => {
+    if (!e.ctrlKey || !state.pages.length) return;
+    e.preventDefault();
+    zoomTo(state.zoom * Math.exp(-e.deltaY * 0.01), anchorAt(e.clientX, e.clientY), e.clientX, e.clientY);
+  }, { passive: false });
+
+  // Stop the phone from zooming the whole app (that pushed the buttons off screen).
+  ["gesturestart", "gesturechange", "gestureend"].forEach((t) => document.addEventListener(t, (e) => e.preventDefault(), { passive: false }));
+  document.addEventListener("touchmove", (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
 
   let resizeTimer = 0;
   window.addEventListener("resize", () => {
@@ -685,22 +771,11 @@ img{max-width:100%}
     toast("Date set to " + it.text);
   }
 
-  function mostVisiblePage() {
-    const vr = viewer.getBoundingClientRect();
-    let best = 0, bestArea = -1;
-    state.pages.forEach((pg, i) => {
-      const r = pg.el.getBoundingClientRect();
-      const w = Math.max(0, Math.min(vr.right, r.right) - Math.max(vr.left, r.left));
-      const h = Math.max(0, Math.min(vr.bottom, r.bottom) - Math.max(vr.top, r.top));
-      if (w * h > bestArea) { bestArea = w * h; best = i; }
-    });
-    return best;
-  }
-
   function addItem(type) {
     if (!state.pages.length) return;
     if (type === "sig" && !maskImg) { sigFile.click(); return; }
-    const pi = mostVisiblePage();
+    const vr = visibleRect();
+    const pi = pageIndexAt((vr.top + vr.bottom) / 2);
     const pg = state.pages[pi];
     const it = { id: state.nextId++, type, page: pi, x: 0, y: 0, w: 0, aspect: sigAspect, iso: null, text: "" };
     if (type === "date") {
@@ -708,11 +783,10 @@ img{max-width:100%}
       it.text = isoToDMY(it.iso);
       it.aspect = dateImg(it.text, state.ink).aspect;
     }
-    const wpt = type === "sig" ? state.sigWpt : state.dateWpt;
-    it.w = Math.min(wpt / pg.w, 0.9);
+    it.w = Math.min(type === "sig" ? state.sigFrac : state.dateFrac, 0.9, (pg.h / pg.w) * it.aspect * 0.9);
     const hf = hFrac(it);
     // centre of the part of the page currently on screen
-    const vr = viewer.getBoundingClientRect(), pr = pg.el.getBoundingClientRect();
+    const pr = pg.el.getBoundingClientRect();
     const left = Math.max(vr.left, pr.left), right = Math.min(vr.right, pr.right);
     const top = Math.max(vr.top, pr.top), bottom = Math.min(vr.bottom, pr.bottom);
     let x = ((left + right) / 2 - pr.left) / pr.width - it.w / 2;
@@ -749,10 +823,10 @@ img{max-width:100%}
 
   function updateHint() {
     const s = state.selected;
-    if (s && s.type === "sig") hint.textContent = "Drag to move. Pull the corner to resize. × removes it.";
+    if (s && s.type === "sig") hint.textContent = "Drag to move, even onto another page. Corner resizes.";
     else if (s && s.type === "date") hint.textContent = "Drag to move. Corner resizes. Calendar changes the date.";
     else if (state.items.length) hint.textContent = "Tap an item to adjust it, or Save PDF when you’re done.";
-    else hint.textContent = "Tap Signature or Date to add it to this page.";
+    else hint.textContent = "Tap Signature or Date to add it here. Pinch to zoom.";
   }
 
   function findItem(el) { const id = Number(el.dataset.id); return state.items.find((o) => o.id === id); }
@@ -760,6 +834,8 @@ img{max-width:100%}
   // drag to move, corner to resize (aspect ratio locked)
   let drag = null;
   pagesEl.addEventListener("pointerdown", (e) => {
+    if (pinch || !e.isPrimary) return;
+    if (drag) finishDrag();
     const el = e.target.closest(".item");
     if (!el) return;
     const it = findItem(el);
@@ -769,39 +845,99 @@ img{max-width:100%}
     select(it);
     const pr = state.pages[it.page].el.getBoundingClientRect();
     drag = {
-      it, id: e.pointerId, mode: e.target.closest(".h-size") ? "size" : "move",
-      sx: e.clientX, sy: e.clientY, x: it.x, y: it.y, w: it.w, pw: pr.width, ph: pr.height
+      it, el, id: e.pointerId, mode: e.target.closest(".h-size") ? "size" : "move",
+      sx: e.clientX, sy: e.clientY, cx: e.clientX, cy: e.clientY, moved: false, raf: 0,
+      offX: e.clientX - (pr.left + it.x * pr.width), offY: e.clientY - (pr.top + it.y * pr.height),
+      w: it.w, pw: pr.width, ph: pr.height
     };
     try { el.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     el.classList.add("dragging");
   });
+
+  // Follows the finger anywhere over the document; the item may cross into the next page.
+  function moveDragged() {
+    const it = drag.it, pages = state.pages;
+    const pr = pages[it.page].el.getBoundingClientRect();
+    const first = pages[0].el.getBoundingClientRect(), last = pages[pages.length - 1].el.getBoundingClientRect();
+    const wpx = it.w * pr.width, hpx = hFrac(it) * pr.height;
+    const left = clamp(drag.cx - drag.offX, pr.left, pr.right - wpx);
+    const top = clamp(drag.cy - drag.offY, first.top, last.bottom - hpx);
+    it.x = (left - pr.left) / pr.width;
+    it.y = (top - pr.top) / pr.height;
+    placeItem(it);
+  }
+
+  // Scrolls the document while an item is held near the top or bottom edge.
+  function autoScroll() {
+    if (!drag) return;
+    drag.raf = 0;
+    if (drag.mode !== "move" || !drag.moved) return;
+    const v = visibleRect(), edge = 56;
+    let vy = 0, vx = 0;
+    if (drag.cy < v.top + edge) vy = drag.cy - (v.top + edge);
+    else if (drag.cy > v.bottom - edge) vy = drag.cy - (v.bottom - edge);
+    if (drag.cx < v.left + edge) vx = drag.cx - (v.left + edge);
+    else if (drag.cx > v.right - edge) vx = drag.cx - (v.right - edge);
+    if (!vx && !vy) return;
+    const t0 = viewer.scrollTop, l0 = viewer.scrollLeft;
+    viewer.scrollTop = t0 + clamp(vy * 0.3, -20, 20);
+    viewer.scrollLeft = l0 + clamp(vx * 0.3, -20, 20);
+    if (viewer.scrollTop === t0 && viewer.scrollLeft === l0) return;
+    moveDragged();
+    drag.raf = requestAnimationFrame(autoScroll);
+  }
+
   pagesEl.addEventListener("pointermove", (e) => {
     if (!drag || e.pointerId !== drag.id) return;
     e.preventDefault();
-    const it = drag.it, dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    drag.cx = e.clientX;
+    drag.cy = e.clientY;
+    if (!drag.moved && Math.hypot(drag.cx - drag.sx, drag.cy - drag.sy) > 6) drag.moved = true;
+    const it = drag.it;
     if (drag.mode === "move") {
-      it.x = clamp(drag.x + dx / drag.pw, 0, 1 - it.w);
-      it.y = clamp(drag.y + dy / drag.ph, 0, 1 - hFrac(it));
-    } else {
-      const wpx = drag.w * drag.pw, hpx = wpx / it.aspect, diag = Math.hypot(wpx, hpx);
-      const along = (dx * wpx + dy * hpx) / diag;
-      const maxW = Math.min((1 - it.x) * drag.pw, (1 - it.y) * drag.ph * it.aspect);
-      const nw = clamp(wpx * (diag + along) / diag, Math.min(24, maxW), maxW);
-      it.w = nw / drag.pw;
+      moveDragged();
+      if (!drag.raf) drag.raf = requestAnimationFrame(autoScroll);
+      return;
     }
+    const dx = drag.cx - drag.sx, dy = drag.cy - drag.sy;
+    const wpx = drag.w * drag.pw, hpx = wpx / it.aspect, diag = Math.hypot(wpx, hpx);
+    const along = (dx * wpx + dy * hpx) / diag;
+    const maxW = Math.min((1 - it.x) * drag.pw, (1 - it.y) * drag.ph * it.aspect);
+    const nw = clamp(wpx * (diag + along) / diag, Math.min(24, maxW), maxW);
+    it.w = nw / drag.pw;
     placeItem(it);
   });
-  function endDrag(e) {
-    if (!drag || e.pointerId !== drag.id) return;
-    const it = drag.it;
-    it.el.classList.remove("dragging");
-    if (drag.mode === "size") {
-      const wpt = Math.round(it.w * state.pages[it.page].w);
-      if (it.type === "sig") { state.sigWpt = wpt; store.set("sigWpt", wpt); }
-      else { state.dateWpt = wpt; store.set("dateWpt", wpt); }
-    }
-    drag = null;
+
+  // On release, the item belongs to whichever page its centre is over.
+  function settleItem(it) {
+    const from = state.pages[it.page].el.getBoundingClientRect();
+    const wpx = it.w * from.width, hpx = wpx / it.aspect;
+    const left = from.left + it.x * from.width, top = from.top + it.y * from.height;
+    const before = it.page;
+    const i = pageIndexAt(top + hpx / 2);
+    const pg = state.pages[i], r = pg.el.getBoundingClientRect();
+    it.page = i;
+    it.w = Math.min(wpx / r.width, 1, (pg.h / pg.w) * it.aspect);
+    it.x = clamp((left - r.left) / r.width, 0, 1 - it.w);
+    it.y = clamp((top - r.top) / r.height, 0, 1 - hFrac(it));
+    if (it.el.parentNode !== pg.layer) pg.layer.append(it.el);
+    placeItem(it);
+    if (i !== before) toast("Moved to page " + (i + 1));
   }
+
+  function finishDrag() {
+    const d = drag;
+    drag = null;
+    if (d.raf) cancelAnimationFrame(d.raf);
+    d.el.classList.remove("dragging");
+    try { d.el.releasePointerCapture(d.id); } catch (err) { /* already released */ }
+    const it = d.it;
+    if (d.mode === "move") { settleItem(it); return; }
+    const frac = Math.round(it.w * 1000) / 1000;
+    if (it.type === "sig") { state.sigFrac = frac; store.set("sigFrac", frac); }
+    else { state.dateFrac = frac; store.set("dateFrac", frac); }
+  }
+  function endDrag(e) { if (drag && e.pointerId === drag.id) finishDrag(); }
   pagesEl.addEventListener("pointerup", endDrag);
   pagesEl.addEventListener("pointercancel", endDrag);
 
@@ -835,7 +971,7 @@ img{max-width:100%}
     for (const pg of state.pages) releasePage(pg);
     if (state.pdf) { try { state.pdf.destroy(); } catch (e) { /* ignore */ } }
     pagesEl.innerHTML = "";
-    Object.assign(state, { pdf: null, bytes: null, pages: [], items: [], selected: null, zoom: 0 });
+    Object.assign(state, { pdf: null, bytes: null, pages: [], items: [], selected: null, zoom: 1 });
     if (!silent) { editor.hidden = true; home.hidden = false; }
   }
   $("#closeBtn").addEventListener("click", () => {
